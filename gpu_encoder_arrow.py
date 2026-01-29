@@ -859,7 +859,13 @@ Examples:
     log.separator()
 
     # 创建服务器
-    location = flight.Location.for_grpc_tcp(args.bind)
+    if ":" in args.bind:
+        host, port = args.bind.split(":")
+        port = int(port)
+    else:
+        host = args.bind
+        port = 8815
+    location = flight.Location.for_grpc_tcp(host, port)
     server = ArrowVideoServer(args, log, location=location)
 
     # 信号处理
