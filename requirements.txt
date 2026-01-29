@@ -5,8 +5,12 @@
 torch>=2.0.0
 numpy>=1.24.0
 
-# ZMQ Communication
-pyzmq>=25.0.0
+# Transport Layer (choose one)
+pyzmq>=25.0.0          # ZeroMQ (original protocol)
+pyarrow>=16.0.0         # Apache Arrow Flight (new, recommended)
+
+# Progress bars
+tqdm>=4.66.0
 
 # Optional: for development
 # pytest>=7.0.0
