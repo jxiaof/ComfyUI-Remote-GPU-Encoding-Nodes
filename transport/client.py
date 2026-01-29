@@ -58,11 +58,13 @@ class ArrowVideoClient:
         """连接到服务端"""
         try:
             self.log.info(f"Connecting to Arrow Flight: {self.endpoint}")
-            if ":" in self.endpoint:
-                host, port = self.endpoint.split(":")
+            # 移除 grpc:// 前缀
+            endpoint = self.endpoint.replace("grpc://", "").replace("grpcs://", "")
+            if ":" in endpoint:
+                host, port = endpoint.split(":")
                 port = int(port)
             else:
-                host = self.endpoint
+                host = endpoint
                 port = 8815
             location = flight.Location.for_grpc_tcp(host, port)
             self.client = flight.FlightClient(location)
