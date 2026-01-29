@@ -98,10 +98,12 @@ def create_session_descriptor(
     session_id: str, metadata: Dict[str, Any]
 ) -> flight.FlightDescriptor:
     """创建会话描述符"""
+    import json
+
     descriptor = flight.FlightDescriptor.for_path(
         f"{FlightDescriptorType.SESSION_START}/{session_id}"
     )
-    descriptor.descriptor = pa.serialize_pandas(metadata).to_buffer()
+    descriptor.descriptor = pa.py_buffer(json.dumps(metadata).encode())
     return descriptor
 
 

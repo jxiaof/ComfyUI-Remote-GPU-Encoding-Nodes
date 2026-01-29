@@ -559,10 +559,11 @@ class VideoFlightHandler(flight.ServerMiddleware):
                     "fps": session.fps_actual,
                     "elapsed": session.elapsed,
                 }
-                data = pa.array([json.dumps(info)])
-                return flight.RecordBatchStream(
-                    pa.RecordBatch.from_pydict({"info": data})
+                schema = pa.schema([("info", pa.string())])
+                batch = pa.RecordBatch.from_pydict(
+                    {"info": pa.array([json.dumps(info)])}
                 )
+                return flight.RecordBatchStream(schema, [batch])
 
         raise flight.FlightNotFoundError("Session not found")
 
@@ -598,30 +599,53 @@ class VideoFlightHandler(flight.ServerMiddleware):
         """处理会话开始"""
         self.log.header(f"Session Start: {session_id}")
 
+        # 默认值
+        output_path = f"/tmp/video_{session_id}.mp4"
+        width = 1920
+        height = 1080
+        fps = 30
+        total_frames = 0
+        has_audio = False
+
         # 解析元数据
         metadata_bytes = descriptor.descriptor
         if metadata_bytes:
             try:
                 metadata_dict = json.loads(metadata_bytes.to_pybytes())
                 self.log.kv("Metadata", json.dumps(metadata_dict, indent=2))
+
+                # 从元数据中提取参数
+                output_path = metadata_dict.get("output_path", output_path)
+                width = metadata_dict.get("width", width)
+                height = metadata_dict.get("height", height)
+                fps = metadata_dict.get("fps", fps)
+                total_frames = metadata_dict.get("total_frames", total_frames)
+                has_audio = metadata_dict.get("has_audio", has_audio)
             except Exception as e:
                 self.log.warning(f"Failed to parse metadata: {e}")
 
-        # 读取会话配置
+        # 读取会话配置（如果有额外的数据）
         for batch in reader:
             data = batch.to_pydict()
             self.log.debug(f"Session config: {data}")
             break
 
+        # 如果指定了输出目录，使用它
+        if self.args.output_dir:
+            import os
+
+            filename = os.path.basename(output_path)
+            output_path = os.path.join(self.args.output_dir, filename)
+
         # 创建会话
         session = SessionInfo(
             session_id=session_id,
-            output_path=f"/tmp/video_{session_id}.mp4",
-            width=1920,
-            height=1080,
-            fps=30,
-            total_frames=0,
-            has_audio=False,
+            output_path=output_path,
+            width=width,
+            height=height,
+            fps=fps,
+            total_frames=total_frames,
+            has_audio=has_audio,
         )
 
         self.sessions[session_id] = session
@@ -629,6 +653,10 @@ class VideoFlightHandler(flight.ServerMiddleware):
 
         self.log.kv("Session ID", session_id)
         self.log.kv("Output", session.output_path)
+        self.log.kv("Resolution", f"{session.width}×{session.height}")
+        self.log.kv("FPS", session.fps)
+        self.log.kv("Total Frames", session.total_frames)
+        self.log.kv("Audio", "Yes" if session.has_audio else "No")
         self.log.success("Session started")
 
     def _handle_video_frames(self, session_id: str, reader, writer):
