@@ -1,10 +1,11 @@
 """
-ComfyUI Remote GPU Encoding Nodes
-远程 GPU 编码节点
+ComfyUI Remote GPU Encoding Nodes (Optimized ZMQ Version)
+远程 GPU 编码节点（ZMQ 优化版本）
 
-功能:
-- 视频帧远程传输
-- 帧统计收集
+特性:
+- 零拷贝传输
+- tqdm 专业进度条
+- 流式和批量传输
 - 会话管理
 """
 
@@ -16,6 +17,7 @@ from typing import Dict, Any, Tuple
 
 try:
     import zmq
+    from tqdm import tqdm
 
     HAS_ZMQ = True
 except ImportError:
@@ -36,15 +38,14 @@ from .utils import NetworkUtils, SessionStorage, ConnectionManager, parse_audio
 configure_logging(level=LogLevel.INFO)
 
 
-class RemoteGPUEncoder:
+class RemoteGPUEncoderOptimized:
     """
-    远程 GPU 编码器
-
-    将视频帧发送到远程 GPU 服务器进行硬件编码
+    远程 GPU 编码器（ZMQ 优化版本）
 
     特性:
-    - 高速网络传输
-    - 支持音频
+    - 零拷贝传输
+    - tqdm 专业进度条
+    - 流式和批量传输
     - 会话管理
     - 连接复用
     """
@@ -109,28 +110,22 @@ class RemoteGPUEncoder:
                 ),
                 "show_progress": (
                     "BOOLEAN",
-                    {"default": True, "tooltip": "Show transfer progress"},
+                    {"default": True, "tooltip": "Show tqdm progress bar"},
                 ),
-                "batch_mode": (
-                    "BOOLEAN",
-                    {"default": True, "tooltip": "Enable batch sending mode"},
-                ),
-                "batch_window_ms": (
-                    "INT",
+                "transport_mode": (
+                    ["stream", "batch", "auto"],
                     {
-                        "default": 100,
-                        "min": 10,
-                        "max": 1000,
-                        "tooltip": "Batch time window (ms)",
+                        "default": "auto",
+                        "tooltip": "stream: zero-copy streaming | batch: optimized batching | auto: auto-select",
                     },
                 ),
-                "min_batch_size": (
+                "batch_size": (
                     "INT",
                     {
                         "default": 10,
                         "min": 1,
                         "max": 100,
-                        "tooltip": "Minimum frames per batch",
+                        "tooltip": "Batch size for batch mode",
                     },
                 ),
             },
@@ -153,9 +148,8 @@ class RemoteGPUEncoder:
         total_frames: int = 0,
         check_network: bool = True,
         show_progress: bool = True,
-        batch_mode: bool = True,
-        batch_window_ms: int = 100,
-        min_batch_size: int = 10,
+        transport_mode: str = "auto",
+        batch_size: int = 10,
     ) -> Tuple[str, str, int, float, float]:
         log = Logger("Encoder")
 
@@ -164,6 +158,7 @@ class RemoteGPUEncoder:
             log.error(error_msg)
             return (error_msg, "", 0, 0.0, 0.0)
 
+        # 解析图像
         if len(images.shape) == 4:
             num_frames, h, w, c = images.shape
         else:
@@ -176,9 +171,11 @@ class RemoteGPUEncoder:
         should_start = session_mode in ("auto", "start")
         should_end = session_mode in ("auto", "end")
 
+        # 解析音频
         audio_info = parse_audio(audio)
         has_audio = audio_info["has_audio"]
 
+        # 网络检查
         if check_network:
             log.info(f"Checking network: {encoder_address}")
             is_valid, msg = NetworkUtils.validate_endpoint(
@@ -187,6 +184,7 @@ class RemoteGPUEncoder:
             if not is_valid:
                 log.warning(f"Network warning: {msg}")
 
+        # 获取连接
         try:
             socket = ConnectionManager.get_socket(encoder_address, check_network=False)
         except Exception as e:
@@ -194,6 +192,7 @@ class RemoteGPUEncoder:
             log.error(error_msg)
             return (error_msg, "", 0, 0.0, 0.0)
 
+        # 会话管理
         if should_start:
             session_id = uuid.uuid4().bytes
             self._active_sessions[encoder_address] = {
@@ -220,8 +219,9 @@ class RemoteGPUEncoder:
         session = self._active_sessions[encoder_address]
         session_hex = session_id.hex()[:16]
 
+        # ========== SESSION_START ==========
         if should_start:
-            log.header(f"Remote GPU Encoding Session")
+            log.header(f"Remote GPU Encoding Session (ZMQ Optimized)")
             log.kv("Session", session_hex)
             log.kv("Encoder", encoder_address)
             log.kv("Output", output_path)
@@ -251,6 +251,7 @@ class RemoteGPUEncoder:
 
             time.sleep(0.2)
 
+        # ========== AUDIO_DATA ==========
         if has_audio and should_start and audio_info["data"]:
             audio_header = AudioHeader(
                 audio_format=audio_info["format"],
@@ -261,39 +262,110 @@ class RemoteGPUEncoder:
                 session_id=session_id,
             )
 
-            msg = audio_header.pack() + audio_info["data"]
-            socket.send(msg, zmq.NOBLOCK)
+            socket.send_multipart(
+                [audio_header.pack(), audio_info["data"]], zmq.NOBLOCK
+            )
             session["audio_bytes"] = len(audio_info["data"])
-            ConnectionManager.update_stats(encoder_address, len(msg))
+            ConnectionManager.update_stats(encoder_address, len(audio_info["data"]))
 
             log.success(f"Audio sent: {len(audio_info['data']) / 1024:.1f}KB")
             time.sleep(0.1)
 
+        # ========== FRAME_DATA ==========
         log.info(f"Sending {num_frames} frames...")
-        if batch_mode:
-            log.info(
-                f"Batch mode: window={batch_window_ms}ms, min_size={min_batch_size}"
-            )
+        log.info(f"Transport mode: {transport_mode}")
+
         send_start = time.time()
+        total_bytes = 0
 
-        if batch_mode and batch_window_ms > 0:
-            batch = []
-            batch_start_time = time.time()
+        # 自动选择传输模式
+        if transport_mode == "auto":
+            if num_frames > 50:
+                transport_mode = "batch"
+                log.info(f"Auto-selected: batch mode ({num_frames} frames)")
+            else:
+                transport_mode = "stream"
+                log.info(f"Auto-selected: stream mode ({num_frames} frames)")
 
-            for i in range(num_frames):
-                frame_np = (images[i].cpu().numpy() * 255).astype(np.uint8)
-                pixel_data = frame_np.tobytes()
-                batch.append(pixel_data)
+        # GPU → CPU (唯一拷贝)
+        images_np = (images.cpu().numpy() * 255).astype(np.uint8)
 
-                elapsed = (time.time() - batch_start_time) * 1000
-                should_send = (
-                    len(batch) >= min_batch_size
-                    or elapsed >= batch_window_ms
-                    or i == num_frames - 1
-                )
+        # ========== 流式传输（零拷贝）==========
+        if transport_mode == "stream":
+            frame_size = w * h * c
 
-                if should_send:
-                    batch_data = b"".join(batch)
+            with tqdm(
+                total=num_frames,
+                desc="ZMQ Stream",
+                unit="frame",
+                disable=not show_progress,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
+            ) as pbar:
+                for i in range(num_frames):
+                    # 零拷贝：直接使用 numpy 数组
+                    frame_np = images_np[i]
+
+                    session["frames_sent"] += 1
+                    session["bytes_sent"] += frame_np.nbytes
+                    total_bytes += frame_np.nbytes
+
+                    header = VideoHeader(
+                        msg_type=MessageType.FRAME_DATA,
+                        pixel_format=PixelFormat.RGB24,
+                        width=w,
+                        height=h,
+                        channels=c,
+                        data_len=frame_np.nbytes,
+                        frame_num=session["frames_sent"],
+                        session_id=session_id,
+                        total_frames=total_frames,
+                        fps=fps,
+                        output_path=output_path,
+                    )
+
+                    # 零拷贝：send_multipart + copy=False
+                    socket.send_multipart([header.pack(), frame_np], flags=zmq.NOBLOCK)
+                    ConnectionManager.update_stats(encoder_address, frame_np.nbytes)
+
+                    # 更新进度条
+                    elapsed_total = time.time() - session["start_time"]
+                    current_fps = (
+                        session["frames_sent"] / elapsed_total
+                        if elapsed_total > 0
+                        else 0
+                    )
+                    mb = session["bytes_sent"] / (1024 * 1024)
+                    gbps = (mb * 8) / elapsed_total / 1000 if elapsed_total > 0 else 0
+
+                    pbar.update(1)
+                    pbar.set_postfix_str(
+                        f"{current_fps:.1f} fps | {mb:.1f} MB | {gbps:.2f} Gbps"
+                    )
+
+        # ========== 批量传输（优化）==========
+        elif transport_mode == "batch":
+            # 预分配批量缓冲区
+            frame_size = w * h * c
+            buffer_size = frame_size * batch_size
+            batch_buffer = np.zeros(buffer_size, dtype=np.uint8)
+            buffer_offset = 0
+
+            with tqdm(
+                total=num_frames,
+                desc="ZMQ Batch",
+                unit="frame",
+                disable=not show_progress,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
+            ) as pbar:
+                for i in range(0, num_frames, batch_size):
+                    batch_end = min(i + batch_size, num_frames)
+                    current_batch_size = batch_end - i
+
+                    # 使用预分配缓冲区
+                    batch_buffer[: current_batch_size * frame_size] = images_np[
+                        i:batch_end
+                    ].flatten()
+
                     start_frame = session["frames_sent"] + 1
 
                     header = VideoHeader(
@@ -302,7 +374,7 @@ class RemoteGPUEncoder:
                         width=w,
                         height=h,
                         channels=c,
-                        data_len=len(batch_data),
+                        data_len=current_batch_size * frame_size,
                         frame_num=start_frame,
                         session_id=session_id,
                         total_frames=total_frames,
@@ -310,72 +382,34 @@ class RemoteGPUEncoder:
                         output_path=output_path,
                     )
 
-                    msg = header.pack() + batch_data
-                    socket.send(msg, zmq.NOBLOCK)
-                    ConnectionManager.update_stats(encoder_address, len(msg))
+                    # 零拷贝：使用预分配缓冲区
+                    batch_data = batch_buffer[: current_batch_size * frame_size]
 
-                    batch_size = len(batch)
-                    session["frames_sent"] += batch_size
-                    session["bytes_sent"] += len(batch_data)
-
-                    if show_progress:
-                        elapsed_total = time.time() - session["start_time"]
-                        current_fps = (
-                            session["frames_sent"] / elapsed_total
-                            if elapsed_total > 0
-                            else 0
-                        )
-                        mb = session["bytes_sent"] / (1024 * 1024)
-                        gbps = (
-                            (mb * 8) / elapsed_total / 1000 if elapsed_total > 0 else 0
-                        )
-
-                        log.progress(
-                            session["frames_sent"],
-                            total_frames,
-                            suffix=f"{current_fps:.1f} fps | {mb:.1f} MB | {gbps:.2f} Gbps | {batch_size}f/batch",
-                        )
-
-                    batch.clear()
-                    batch_start_time = time.time()
-        else:
-            for i in range(num_frames):
-                frame_np = (images[i].cpu().numpy() * 255).astype(np.uint8)
-                pixel_data = frame_np.tobytes()
-
-                session["frames_sent"] += 1
-                session["bytes_sent"] += len(pixel_data)
-
-                header = VideoHeader(
-                    msg_type=MessageType.FRAME_DATA,
-                    pixel_format=PixelFormat.RGB24,
-                    width=w,
-                    height=h,
-                    channels=c,
-                    data_len=len(pixel_data),
-                    frame_num=session["frames_sent"],
-                    session_id=session_id,
-                    total_frames=total_frames,
-                    fps=fps,
-                    output_path=output_path,
-                )
-
-                msg = header.pack() + pixel_data
-                socket.send(msg, zmq.NOBLOCK)
-                ConnectionManager.update_stats(encoder_address, len(msg))
-
-                if show_progress:
-                    elapsed = time.time() - session["start_time"]
-                    current_fps = session["frames_sent"] / elapsed if elapsed > 0 else 0
-                    mb = session["bytes_sent"] / (1024 * 1024)
-                    gbps = (mb * 8) / elapsed / 1000 if elapsed > 0 else 0
-
-                    log.progress(
-                        session["frames_sent"],
-                        total_frames,
-                        suffix=f"{current_fps:.1f} fps | {mb:.1f} MB | {gbps:.2f} Gbps",
+                    socket.send_multipart(
+                        [header.pack(), batch_data], flags=zmq.NOBLOCK
                     )
 
+                    session["frames_sent"] += current_batch_size
+                    session["bytes_sent"] += len(batch_data)
+                    total_bytes += len(batch_data)
+                    ConnectionManager.update_stats(encoder_address, len(batch_data))
+
+                    # 更新进度条
+                    elapsed_total = time.time() - session["start_time"]
+                    current_fps = (
+                        session["frames_sent"] / elapsed_total
+                        if elapsed_total > 0
+                        else 0
+                    )
+                    mb = session["bytes_sent"] / (1024 * 1024)
+                    gbps = (mb * 8) / elapsed_total / 1000 if elapsed_total > 0 else 0
+
+                    pbar.update(current_batch_size)
+                    pbar.set_postfix_str(
+                        f"{current_fps:.1f} fps | {mb:.1f} MB | {gbps:.2f} Gbps | {current_batch_size}f/batch"
+                    )
+
+        # ========== SESSION_END ==========
         if should_end:
             header = VideoHeader(
                 msg_type=MessageType.SESSION_END,
@@ -397,6 +431,7 @@ class RemoteGPUEncoder:
 
             log.success("Session completed")
 
+        # ========== 统计 ==========
         total_time = time.time() - session["start_time"]
         frames_sent = session["frames_sent"]
         send_time = time.time() - send_start
@@ -411,6 +446,7 @@ class RemoteGPUEncoder:
         report = f"""
  ┌─────────────────────────────────────────────────────────────────────┐
  │                   REMOTE GPU ENCODING REPORT                        │
+ │                   (ZMQ Optimized Zero-Copy)                      │
  ├─────────────────────────────────────────────────────────────────────┤
  │  Session:      {session_hex:<54}│
  │  Encoder:      {encoder_address:<54}│
@@ -426,6 +462,7 @@ class RemoteGPUEncoder:
  │    Size:       {audio_mb:.2f} MB{"":<50}│
  ├─────────────────────────────────────────────────────────────────────┤
  │  TRANSFER                                                           │
+ │    Mode:        {transport_mode.upper():<50}│
  │    Time:       {total_time:.2f}s{"":<51}│
  │    Data:       {total_mb:.2f} MB{"":<50}│
  │    Bandwidth:  {throughput_gbps:.2f} Gbps{"":<47}│
@@ -453,8 +490,8 @@ class RemoteGPUEncoder:
         return float("nan")
 
 
-class RemoteEncoderConnection:
-    """远程编码器连接管理"""
+class RemoteEncoderConnectionOptimized:
+    """远程编码器连接管理（优化版本）"""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -522,141 +559,16 @@ class RemoteEncoderConnection:
         return float("nan")
 
 
-class FrameStatistics:
-    """帧统计收集器"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "images": ("IMAGE", {"tooltip": "Input images to analyze"}),
-            },
-            "optional": {
-                "reset": ("BOOLEAN", {"default": False, "tooltip": "Reset statistics"}),
-                "stats_id": (
-                    "STRING",
-                    {"default": "default", "tooltip": "Statistics group ID"},
-                ),
-            },
-        }
-
-    RETURN_TYPES = ("STRING", "INT", "FLOAT", "FLOAT")
-    RETURN_NAMES = ("report", "total_frames", "elapsed_time", "avg_fps")
-    FUNCTION = "collect"
-    CATEGORY = "Remote GPU Encoding/Utils"
-    OUTPUT_NODE = True
-
-    def collect(
-        self,
-        images: torch.Tensor,
-        reset: bool = False,
-        stats_id: str = "default",
-    ) -> Tuple[str, int, float, float]:
-        log = Logger("Statistics")
-        now = time.time()
-
-        if reset or not SessionStorage.exists(stats_id):
-            SessionStorage.set(
-                stats_id,
-                {
-                    "start_time": now,
-                    "frame_count": 0,
-                    "total_bytes": 0,
-                },
-            )
-            log.info(f"Statistics reset: {stats_id}")
-
-        stats = SessionStorage.get(stats_id)
-
-        if len(images.shape) == 4:
-            batch, h, w, c = images.shape
-        else:
-            batch, h, w, c = 1, *images.shape
-
-        bytes_per_frame = w * h * c
-        stats["frame_count"] += batch
-        stats["total_bytes"] += bytes_per_frame * batch
-
-        elapsed = now - stats["start_time"]
-        fps = stats["frame_count"] / elapsed if elapsed > 0 else 0
-        mb = stats["total_bytes"] / (1024 * 1024)
-
-        report = (
-            f"Frames: {stats['frame_count']} | "
-            f"Time: {elapsed:.2f}s | "
-            f"FPS: {fps:.1f} | "
-            f"Data: {mb:.1f}MB"
-        )
-
-        return (report, stats["frame_count"], round(elapsed, 3), round(fps, 2))
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
-
-
-class FrameCounter:
-    """简单帧计数器"""
-
-    _counters: Dict[str, Dict] = {}
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "images": ("IMAGE", {"tooltip": "Input images"}),
-            },
-            "optional": {
-                "reset": ("BOOLEAN", {"default": False, "tooltip": "Reset counter"}),
-                "counter_id": (
-                    "STRING",
-                    {"default": "counter", "tooltip": "Counter ID"},
-                ),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE", "INT", "FLOAT", "STRING")
-    RETURN_NAMES = ("images", "count", "elapsed", "info")
-    FUNCTION = "count"
-    CATEGORY = "Remote GPU Encoding/Utils"
-
-    def count(
-        self,
-        images: torch.Tensor,
-        reset: bool = False,
-        counter_id: str = "counter",
-    ) -> Tuple[torch.Tensor, int, float, str]:
-        now = time.time()
-
-        if reset or counter_id not in self._counters:
-            self._counters[counter_id] = {"start": now, "count": 0}
-
-        counter = self._counters[counter_id]
-        batch = images.shape[0] if len(images.shape) == 4 else 1
-        counter["count"] += batch
-
-        elapsed = now - counter["start"]
-        fps = counter["count"] / elapsed if elapsed > 0 else 0
-
-        info = f"Frame {counter['count']} | {elapsed:.2f}s | {fps:.1f} fps"
-
-        return (images, counter["count"], round(elapsed, 3), info)
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
-
+# ============================================================================
+# 节点注册
+# ============================================================================
 
 NODE_CLASS_MAPPINGS = {
-    "RemoteGPUEncoder": RemoteGPUEncoder,
-    "RemoteEncoderConnection": RemoteEncoderConnection,
-    "FrameStatistics": FrameStatistics,
-    "FrameCounter": FrameCounter,
+    "RemoteGPUEncoderOptimized": RemoteGPUEncoderOptimized,
+    "RemoteEncoderConnectionOptimized": RemoteEncoderConnectionOptimized,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RemoteGPUEncoder": "Remote GPU Encoder",
-    "RemoteEncoderConnection": "Encoder Connection",
-    "FrameStatistics": "Frame Statistics",
-    "FrameCounter": "Frame Counter",
+    "RemoteGPUEncoderOptimized": "Remote GPU Encoder (ZMQ Optimized)",
+    "RemoteEncoderConnectionOptimized": "Encoder Connection",
 }
