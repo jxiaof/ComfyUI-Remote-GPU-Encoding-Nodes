@@ -11,8 +11,34 @@
 - **音频支持** - 自动传输音频轨道
 - **智能连接** - 网络检测、连接复用、自动重连
 - **会话管理** - 支持单批次和多批次传输
+- **批量传输** - v2.0 新增，大幅提升高帧率场景性能
 
-## 安装
+## 项目结构
+
+```
+comfyui-remote-encoding/
+├── __init__.py              # 包入口
+├── nodes.py                 # ComfyUI 节点定义
+├── gpu_encoder.py           # 独立编码服务器（单文件可运行）
+├── protocol/                # 协议定义模块
+│   ├── __init__.py
+│   └── protocol.py
+├── logger/                  # 日志系统模块
+│   ├── __init__.py
+│   └── logger.py
+├── utils/                   # 工具类模块
+│   ├── __init__.py
+│   ├── network.py           # 网络工具
+│   ├── storage.py           # 会话存储
+│   ├── connection.py        # 连接管理
+│   └── audio.py             # 音频解析
+├── README.md
+└── requirements.txt
+```
+
+## 快速开始
+
+### 1. 安装
 
 ```bash
 cd ComfyUI/custom_nodes
@@ -20,9 +46,7 @@ git clone https://github.com/your-repo/comfyui-remote-encoding.git
 pip install -r comfyui-remote-encoding/requirements.txt
 ```
 
-## 快速开始
-
-### 1. 启动编码服务器
+### 2. 启动编码服务器（GPU 机器）
 
 在 GPU 服务器上运行:
 
@@ -30,7 +54,7 @@ pip install -r comfyui-remote-encoding/requirements.txt
 python gpu_encoder.py --bind tcp://0.0.0.0:5555
 ```
 
-### 2. ComfyUI 工作流
+### 3. ComfyUI 工作流
 
 添加  **Remote GPU Encoder** 节点:
 
@@ -55,6 +79,9 @@ python gpu_encoder.py --bind tcp://0.0.0.0:5555
 | `audio` | 音频 | 可选 |
 | `session_mode` | 会话模式 | `auto` |
 | `check_network` | 网络检测 | `true` |
+| `batch_mode` | 批量模式 | `true` |
+| `batch_window_ms` | 批量时间窗口 (ms) | 100 |
+| `min_batch_size` | 最小批量帧数 | 10 |
 
 **会话模式:**
 - `auto` - 单批次，自动开始和结束
@@ -78,6 +105,7 @@ python gpu_encoder.py --bind tcp://0.0.0.0:5555
 帧统计收集器。
 
 ### Frame Counter
+
 简单帧计数器。
 
 ## 编码服务器参数
@@ -103,6 +131,85 @@ Options:
 | 720p | 2.7 MB | 650 Mbps |
 | 1080p | 6.2 MB | 1.5 Gbps |
 | 4K | 24.9 MB | 6.0 Gbps |
+
+## 批量传输模式
+
+v2.0 新增批量传输功能，大幅提升高帧率场景性能。
+
+### 性能对比
+
+| 模式 | 系统调用次数 | 协议开销 | 适用场景 |
+|------|------------|---------|---------|
+| 单帧 | 每帧 1 次 | 128 字节/帧 | 低帧率、小批量 |
+| 批量 | 每批 1 次 | 128 字节/批 | 高帧率、长视频 |
+
+### 参数说明
+
+| 参数 | 默认值 | 说明 |
+|------|-------|------|
+| `batch_mode` | true | 启用批量模式 |
+| `batch_window_ms` | 100 | 批量时间窗口（毫秒） |
+| `min_batch_size` | 10 | 最小批量帧数 |
+
+### 使用建议
+
+- **高分辨率 (4K)**: `batch_window_ms=200`, `min_batch_size=5`
+- **高帧率 (60fps)**: `batch_window_ms=50`, `min_batch_size=20`
+- **低延迟需求**: `batch_mode=false`
+
+## 模块说明
+
+### protocol/
+
+协议定义模块，包含：
+- 消息类型枚举
+- 像素格式定义
+- 音频格式定义
+- 消息头数据类
+- 协议解析器
+
+### logger/
+
+日志系统模块，包含：
+- 彩色终端输出
+- 多日志级别
+- 进度条支持
+- 文件日志支持
+- 线程安全
+
+### utils/
+
+工具类模块，包含：
+- `NetworkUtils` - 网络连接检测
+- `SessionStorage` - 会话数据存储
+- `ConnectionManager` - ZMQ 连接池管理
+- `parse_audio()` - 音频数据解析
+
+## 代码重构说明
+
+### v2.0 重构
+
+- 提取工具类到 `utils/` 模块
+- 分离协议定义到 `protocol/` 模块
+- 分离日志系统到 `logger/` 模块
+- 保持 `gpu_encoder.py` 单文件独立运行
+- 消除重复代码，提高可维护性
+
+### 依赖关系
+
+```
+nodes.py
+    ├── protocol/
+    ├── logger/
+    └── utils/
+            ├── network.py
+            ├── storage.py
+            ├── connection.py
+            └── audio.py
+
+gpu_encoder.py (独立运行)
+    └── 内置协议和日志定义（为了单文件部署）
+```
 
 ## 网络优化
 
