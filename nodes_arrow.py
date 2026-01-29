@@ -126,8 +126,8 @@ class RemoteGPUEncoderArrow:
         audio_info = parse_audio(audio)
         has_audio = audio_info["has_audio"]
 
-        # 获取客户端
-        client = ArrowVideoSender.get_client(f"grpc://{encoder_address}")
+        # 获取客户端（直接传递地址，client 会自动处理 grpc:// 前缀）
+        client = ArrowVideoSender.get_client(encoder_address)
 
         try:
             # 开始会话

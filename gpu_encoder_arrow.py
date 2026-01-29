@@ -359,6 +359,10 @@ class FFmpegEncoder:
             self.log.error("FFmpeg process not running")
             return False
 
+        if not self.process.stdin:
+            self.log.error("FFmpeg stdin not available")
+            return False
+
         try:
             self.process.stdin.write(frame_data)
             self.process.stdin.flush()
@@ -393,8 +397,11 @@ class FFmpegEncoder:
 
             # 检查返回码
             if returncode != 0:
-                stderr = self.process.stderr.read().decode()[-500:]
-                self.log.error(f"FFmpeg failed (code {returncode}):\n{stderr}")
+                try:
+                    stderr = self.process.stderr.read().decode()[-500:]
+                    self.log.error(f"FFmpeg failed (code {returncode}):\n{stderr}")
+                except Exception:
+                    self.log.error(f"FFmpeg failed (code {returncode})")
                 return False
 
             # 统计
@@ -586,7 +593,7 @@ class VideoFlightHandler(flight.ServerMiddleware):
                 )
                 return flight.RecordBatchStream(schema, [batch])
 
-        raise flight.FlightNotFoundError("Session not found")
+        raise flight.FlightServerError("Session not found")
 
     def do_put(self, context, descriptor, reader, writer):
         """处理 PUT 请求（视频/音频数据传输）"""
@@ -709,39 +716,43 @@ class VideoFlightHandler(flight.ServerMiddleware):
         frame_size = session.width * session.height * 3
         total_frames = 0
 
-        with tqdm(
-            total=session.total_frames,
-            desc="Arrow Flight",
-            unit="frame",
-            file=sys.stdout,
-        ) as pbar:
-            for batch in reader:
-                # 获取像素数据
-                pixel_data = batch.column("pixel_data").to_numpy()
-                frame_start = batch.column("frame_start")[0].as_py()
-                frame_end = batch.column("frame_end")[0].as_py()
+        if HAS_TQDM:
+            pbar = tqdm(
+                total=session.total_frames,
+                desc="Arrow Flight",
+                file=sys.stdout,
+            )
+        else:
+            pbar = None
 
-                # 处理每一帧
-                for i in range(frame_start, frame_end):
-                    start = i * frame_size
-                    end = start + frame_size
+        for batch in reader:
+            # 获取像素数据
+            pixel_data = batch.column("pixel_data").to_numpy()
+            frame_start = batch.column("frame_start")[0].as_py()
+            frame_end = batch.column("frame_end")[0].as_py()
 
-                    if end > len(pixel_data):
-                        self.log.error(f"Frame {i}: data size mismatch")
-                        continue
+            # 处理每一帧
+            for i in range(frame_start, frame_end):
+                start = i * frame_size
+                end = start + frame_size
 
-                    frame_bytes = pixel_data[start:end].tobytes()
+                if end > len(pixel_data):
+                    self.log.error(f"Frame {i}: data size mismatch")
+                    continue
 
-                    # 写入 FFmpeg
-                    if not self.encoder.write(frame_bytes):
-                        self.log.error(f"Frame {i}: write failed")
-                        break
+                frame_bytes = pixel_data[start:end].tobytes()
 
-                    # 更新统计
-                    session.frames_received += 1
-                    session.bytes_received += len(frame_bytes)
+                # 写入 FFmpeg
+                if not self.encoder.write(frame_bytes):
+                    self.log.error(f"Frame {i}: write failed")
+                    break
 
-                    # 更新进度条
+                # 更新统计
+                session.frames_received += 1
+                session.bytes_received += len(frame_bytes)
+
+                # 更新进度条
+                if pbar:
                     pbar.update(1)
                     pbar.set_postfix_str(
                         f"{session.fps_actual:.1f} fps | "
