@@ -29,21 +29,39 @@ def parse_audio(audio: Any) -> Dict[str, Any]:
         return result
 
     try:
+        waveform = None
+        sample_rate = 44100
+
         if isinstance(audio, dict):
             waveform = audio.get("waveform")
-            sample_rate = audio.get("sample_rate", 44100)
+            sr = audio.get("sample_rate")
+            if sr is not None:
+                if isinstance(sr, (int, float)):
+                    sample_rate = int(sr)
+                elif hasattr(sr, "__int__"):
+                    sample_rate = int(sr)
         elif isinstance(audio, (tuple, list)) and len(audio) >= 2:
             waveform = audio[0]
-            sample_rate = audio[1] if isinstance(audio[1], int) else 44100
+            sr = audio[1]
+            if isinstance(sr, (int, float)):
+                sample_rate = int(sr)
+            elif hasattr(sr, "__int__"):
+                sample_rate = int(sr)
         else:
             waveform = audio
-            sample_rate = 44100
 
         if waveform is None:
+            log.debug("No waveform data found in audio")
             return result
 
         if isinstance(waveform, torch.Tensor):
             audio_np = waveform.cpu().numpy()
+        elif isinstance(waveform, dict):
+            audio_np = waveform.get("waveform")
+            if audio_np is not None and isinstance(audio_np, torch.Tensor):
+                audio_np = audio_np.cpu().numpy()
+            else:
+                return result
         else:
             audio_np = np.array(waveform)
 
@@ -83,6 +101,6 @@ def parse_audio(audio: Any) -> Dict[str, Any]:
         )
 
     except Exception as e:
-        log.error(f"Audio parse failed: {e}")
+        log.debug(f"Audio parse failed: {e}")
 
     return result
