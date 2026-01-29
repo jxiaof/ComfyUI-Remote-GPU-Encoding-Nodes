@@ -1,258 +1,322 @@
 # ComfyUI Remote GPU Encoding
 
-[![Protocol](https://img.shields.io/badge/Protocol-Arrow%20Flight%20v3.0-blue.svg)]() [![Python](https://img.shields.io/badge/Python-3.10%2B-green.svg)]() [![License](https://img.shields.io/badge/License-MIT-yellow.svg)]()
+**将 ComfyUI 生成的视频帧通过高速网络传输到远程 GPU 服务器进行硬件编码**
 
-将 ComfyUI 生成的视频帧通过 Apache Arrow Flight 零拷贝传输到远程 GPU 服务器进行硬件编码。
+---
 
-## ✨ 新特性 v3.0 (Arrow Flight)
+## 核心亮点
 
--  **零拷贝传输** - 基于 Apache Arrow Flight，性能提升 30%
--  **更高带宽** - 支持 9-11 Gbps 网络吞吐量
--  **专业进度条** - tqdm 高性能进度条
--  **结构化日志** - 分层、彩色、专业日志系统
--  **单文件部署** - gpu_encoder_arrow.py 可独立部署
+- **极致性能** - 9-11 Gbps 带宽，5-10ms 延迟，零拷贝传输
+- **硬件加速** - NVIDIA NVENC H.264/HEVC/AV1 编码
+- **智能管理** - 自动网络检测、连接复用、进度追踪
+- **三种协议** - Arrow Flight（推荐）、ZMQ 优化版、ZMQ 原版
+- **单文件部署** - 编码服务器无需额外依赖，开箱即用
 
-## 特性
+---
 
-- **高速传输** - 支持 10Gbps+ 网络吞吐量
-- **硬件编码** - NVIDIA NVENC (H.264/HEVC/AV1)
-- **音频支持** - 自动传输音频轨道
-- **智能连接** - 网络检测、连接复用、自动重连
-- **会话管理** - 支持单批次和多批次传输
-- **批量传输** - v2.0 新增，大幅提升高帧率场景性能
-
-## 项目结构
+## 架构设计
 
 ```
-comfyui-remote-encoding/
-├── __init__.py              # 包入口
-├── nodes.py                 # ComfyUI 节点定义
-├── gpu_encoder.py           # 独立编码服务器（单文件可运行）
-├── protocol/                # 协议定义模块
-│   ├── __init__.py
-│   └── protocol.py
-├── logger/                  # 日志系统模块
-│   ├── __init__.py
-│   └── logger.py
-├── utils/                   # 工具类模块
-│   ├── __init__.py
-│   ├── network.py           # 网络工具
-│   ├── storage.py           # 会话存储
-│   ├── connection.py        # 连接管理
-│   └── audio.py             # 音频解析
-├── README.md
-└── requirements.txt
+┌──────────────────────────┐         ┌──────────────────┐         ┌─────────────────────────┐
+│   ComfyUI Client         │         │   10Gbps Network │         │   Remote GPU Server     │
+│                          │         │                  │         │                         │
+│  ┌────────────────────┐  │────────▶│  Arrow Flight    │────────▶│  ┌──────────────────┐   │
+│  │  Image Generation  │  │         │  Zero-copy       │         │  │  NVIDIA NVENC    │   │
+│  └────────┬───────────┘  │         │                  │         │  └────────┬─────────┘   │
+│           │              │         │                  │         │           │             │
+│  ┌────────▼───────────┐  │         │                  │         │  ┌────────▼─────────┐   │
+│  │  Node Module       │  │         │                  │         │  │  FFmpeg Muxer    │   │
+│  └────────────────────┘  │         │                  │         │  └────────┬─────────┘   │
+│                          │         │                  │         │           │             │
+└──────────────────────────┘         └──────────────────┘         │  ┌────────▼─────────┐   │
+                                                                  │  │  MP4 Output      │   │
+                                                                  │  └──────────────────┘   │
+                                                                  └─────────────────────────┘
 ```
+
+**设计思路：**
+
+1. **关注点分离** - ComfyUI 负责生成，编码服务器负责编码，通过网络连接
+2. **零拷贝传输** - 使用 Arrow Flight 或 ZMQ 优化，避免不必要的数据拷贝
+3. **批量优化** - 高帧率场景下自动批量传输，减少系统调用
+4. **连接复用** - 多次传输复用同一连接，减少握手开销
+5. **会话管理** - 支持单批次和多批次，灵活适配不同工作流
+
+---
+
+## 协议选择
+
+| 特性 | Arrow Flight v3.0 | ZMQ 优化版 v2.1 | ZMQ 原版 v2.0 |
+|------|------------------|----------------|--------------|
+| **推荐度** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ |
+| 带宽 | 9-11 Gbps | 9-11 Gbps | 7-9 Gbps |
+| 延迟 | 5-10ms | 5-10ms | 5-15ms |
+| 零拷贝 | 完全 | 优化 | 部分 |
+| 协议开销 | 0 字节 | 0 字节（批量） | 128 字节/帧 |
+| 传输模式 | 批量 | 流式/批量/自动 | 批量 |
+| 进度条 | tqdm | tqdm | 自定义 |
+| 日志 | 结构化 | 结构化 | 自定义 |
+
+**推荐：Arrow Flight v3.0** - 最新、最快、最稳定的协议
+
+---
 
 ## 快速开始
 
-### Arrow Flight 版本（推荐）
+### 方式一：Arrow Flight（推荐）
 
 ```bash
 # 1. 安装依赖
 pip install pyarrow tqdm
 
-# 2. 启动 GPU 服务器
+# 2. 启动 GPU 编码服务器
 python gpu_encoder_arrow.py --bind 0.0.0.0:8815
 
-# 3. 切换到 Arrow Flight（修改 __init__.py）
+# 3. 在 ComfyUI 中使用
+# 添加 "Remote GPU Encoder (Arrow Flight)" 节点即可
+```
+
+### 方式二：ZMQ 优化版
+
+```bash
+# 1. 安装依赖
+pip install pyzmq tqdm
+
+# 2. 启动 GPU 编码服务器
+python gpu_encoder.py --bind tcp://0.0.0.0:5555
+
+# 3. 修改 __init__.py 切换到 ZMQ 优化版
+# from .nodes_zmq_optimized import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
+# 4. 在 ComfyUI 中使用 "Remote GPU Encoder (ZMQ Optimized)" 节点
+```
+
+### 切换协议
+
+修改 `__init__.py`：
+
+```python
+# Arrow Flight (默认)
 from .nodes_arrow import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
-# 4. 在 ComfyUI 中使用 "Remote GPU Encoder (Arrow Flight)" 节点
+# ZMQ 优化版
+from .nodes_zmq_optimized import NODE_CLASS_MAPPINGS, NODE_EDITOR_DISPLAY_MAPPINGS
+
+# ZMQ 原版
+from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 ```
 
-### ZMQ 版本（兼容）
+---
 
-### 1. 安装
+## 使用场景
 
-```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/your-repo/comfyui-remote-encoding.git
-pip install -r comfyui-remote-encoding/requirements.txt
-```
-
-### 2. 启动编码服务器（GPU 机器）
-
-在 GPU 服务器上运行:
-
-```bash
-python gpu_encoder.py --bind tcp://0.0.0.0:5555
-```
-
-### 3. ComfyUI 工作流
-
-添加  **Remote GPU Encoder** 节点:
+### 场景一：单批次快速编码
 
 ```
-[Images] → [ Remote GPU Encoder] → [Output]
-              ↑
-           [Audio] (可选)
+生成视频 ─▶ 远程编码 ─▶ 完成
 ```
 
-## 协议对比
+使用默认的 `auto` 会话模式，节点自动管理会话开始和结束。
 
-| 特性 | ZMQ (v2.0) | ZMQ 优化版 (v2.1) | Arrow Flight (v3.0) |
-|------|-----------|------------------|-------------------|
-| 零拷贝 | 部分 | ✅ 优化 | ✅ 完全 |
-| 带宽 | 7-9 Gbps | ✅ **9-11 Gbps** | ✅ 9-11 Gbps |
-| 延迟 | 5-15ms | ✅ **5-10ms** | ✅ 5-10ms |
-| CPU 使用 | 中等 | ✅ 低 | ✅ 低 |
-| 协议开销 | 128字节/帧 | ✅ **0字节（批量）** | ✅ 0字节 |
-| 进度条 | 自定义 | ✅ **tqdm 专业** | ✅ tqdm 专业 |
-| 日志系统 | 自定义 | ✅ 结构化 | ✅ 结构化 |
-| 流式传输 | ❌ | ✅ **支持** | ✅ 支持 |
-| 批量传输 | 部分 | ✅ **优化** | ✅ 支持 |
-| 自动模式 | ❌ | ✅ **支持** | - |
-| 单文件部署 | ✅ 是 | ✅ 是 | ✅ 是 |
+### 场景二：多批次连续编码
 
-## 节点说明
+```
+批次 1 ──▶ 远程编码 ──┐
+批次 2 ──▶ 远程编码 ──┤─▶ 合并输出
+批次 3 ──▶ 远程编码 ──┘
+```
 
-### Remote GPU Encoder (Arrow Flight) [推荐]
+使用 `start`/`continue`/`end` 模式手动控制会话。
 
-主编码节点，使用 Arrow Flight 零拷贝传输。
+### 场景三：大规模批量处理
+
+使用 Arrow Flight + 批量传输模式，适合高帧率、长视频。
+
+---
+
+## 节点参数
+
+### Remote GPU Encoder (Arrow Flight)
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `images` | 视频帧 (BHWC) | 必填 |
-| `encoder_address` | 编码器地址 | `tcp://10.10.0.1:5555` |
+| `encoder_address` | 服务器地址 | `0.0.0.0:8815` |
 | `output_path` | 输出路径 | `/tmp/output.mp4` |
 | `fps` | 帧率 | 30 |
 | `audio` | 音频 | 可选 |
-| `session_mode` | 会话模式 | `auto` |
-| `check_network` | 网络检测 | `true` |
-| `batch_mode` | 批量模式 | `true` |
-| `batch_window_ms` | 批量时间窗口 (ms) | 100 |
-| `min_batch_size` | 最小批量帧数 | 10 |
+| `batch_size` | 批量大小 | 10 |
 
-**会话模式:**
-- `auto` - 单批次，自动开始和结束
-- `start` - 开始新会话
-- `continue` - 继续当前会话
-- `end` - 结束会话
+### Remote GPU Encoder (ZMQ Optimized)
 
-### Encoder Connection
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `images` | 视频帧 (BHWC) | 必填 |
+| `encoder_address` | 服务器地址 | `tcp://10.10.0.1:5555` |
+| `output_path` | 输出路径 | `/tmp/output.mp4` |
+| `fps` | 帧率 | 30 |
+| `transport_mode` | 传输模式 | `auto` |
+| `batch_size` | 批量大小 | 10 |
 
-连接管理节点。
+**传输模式 (ZMQ)：**
+- `auto` - 智能选择（<50 帧用 stream，>=50 帧用 batch）
+- `stream` - 流式传输，最低延迟
+- `batch` - 批量传输，最高吞吐
 
-| 操作 | 说明 |
-|------|------|
-| `status` | 查看连接状态 |
-| `release` | 释放指定连接 |
-| `release_all` | 释放所有连接 |
-| `test` | 测试网络连通性 |
+---
 
-### Frame Statistics
+## 服务器配置
 
-帧统计收集器。
-
-### Frame Counter
-
-简单帧计数器。
-
-## 编码服务器参数
-
-### Arrow Flight 版本
+### 启动参数
 
 ```bash
+# Arrow Flight 服务器
 python gpu_encoder_arrow.py [OPTIONS]
 
-Options:
-  --bind, -b        绑定地址 (默认: 0.0.0.0:8815)
-  --output-dir, -o  输出目录
-  --codec, -c       编码器 [h264_nvenc|hevc_nvenc|av1_nvenc]
-  --preset, -p      预设 [p1-p7]
-  --bitrate         码率 (默认: 20M)
-  --gpu             GPU 索引 (默认: 0)
-  --single-session  单会话后退出
-  --idle-timeout    空闲超时 (秒)
+# ZMQ 服务器
+python gpu_encoder.py [OPTIONS]
 ```
 
-### ZMQ 版本
+**通用选项：**
+- `--bind, -b` - 绑定地址（Arrow 默认 `0.0.0.0:8815`，ZMQ 默认 `tcp://0.0.0.0:5555`）
+- `--output-dir, -o` - 输出目录
+- `--codec, -c` - 编码器（h264_nvenc / hevc_nvenc / av1_nvenc）
+- `--preset, -p` - 预设（p1-p7，p1 最快，p7 质量最好）
+- `--bitrate` - 码率（默认 20M）
+- `--gpu` - GPU 索引（默认 0）
+- `--single-session` - 单会话后退出
+- `--idle-timeout` - 空闲超时（秒）
+
+### 示例
 
 ```bash
-python gpu_encoder.py [OPTIONS]
+# 4K 视频，高码率
+python gpu_encoder_arrow.py --bind 0.0.0.0:8815 --codec av1_nvenc --bitrate 50M --preset p4
 
-Options:
-  --bind, -b        绑定地址 (默认: tcp://10.10.0.1:5555)
-  --output-dir, -o  输出目录
-  --codec, -c       编码器 [h264_nvenc|hevc_nvenc|av1_nvenc]
-  --preset, -p      预设 [p1-p7]
-  --bitrate         码率 (默认: 20M)
-  --gpu             GPU 索引 (默认: 0)
-  --single-session  单会话后退出
-  --idle-timeout    空闲超时 (秒)
+# 高帧率（60fps），快速编码
+python gpu_encoder_arrow.py --bind 0.0.0.0:8815 --preset p2
 ```
 
-## 性能参考
+---
 
-| 分辨率 | 帧大小 | 30fps 带宽 |
-|--------|--------|------------|
-| 720p | 2.7 MB | 650 Mbps |
-| 1080p | 6.2 MB | 1.5 Gbps |
-| 4K | 24.9 MB | 6.0 Gbps |
+##  性能参考
 
-## 批量传输模式
+### 分辨率带宽需求
 
-v2.0 新增批量传输功能，大幅提升高帧率场景性能。
+| 分辨率 | 帧大小 | 30fps 带宽 | 60fps 带宽 |
+|--------|--------|----------|----------|
+| 720p | 2.7 MB | 650 Mbps | 1.3 Gbps |
+| 1080p | 6.2 MB | 1.5 Gbps | 3.0 Gbps |
+| 4K | 24.9 MB | 6.0 Gbps | 12.0 Gbps |
 
-### 性能对比
+### 协议性能对比
 
-| 模式 | 系统调用次数 | 协议开销 | 适用场景 |
-|------|------------|---------|---------|
-| 单帧 | 每帧 1 次 | 128 字节/帧 | 低帧率、小批量 |
-| 批量 | 每批 1 次 | 128 字节/批 | 高帧率、长视频 |
+| 协议 | 720p@30fps | 1080p@30fps | 4K@30fps |
+|------|----------|-----------|---------|
+| Arrow Flight | 1.2x | 1.3x | 1.4x |
+| ZMQ 优化版 | 1.2x | 1.3x | 1.4x |
+| ZMQ 原版 | 1.0x | 1.0x | 1.0x |
 
-### 参数说明
+*相对于 ZMQ 原版的性能提升倍数*
 
-| 参数 | 默认值 | 说明 |
-|------|-------|------|
-| `batch_mode` | true | 启用批量模式 |
-| `batch_window_ms` | 100 | 批量时间窗口（毫秒） |
-| `min_batch_size` | 10 | 最小批量帧数 |
-
-### 使用建议
-
-- **高分辨率 (4K)**: `batch_window_ms=200`, `min_batch_size=5`
-- **高帧率 (60fps)**: `batch_window_ms=50`, `min_batch_size=20`
-- **低延迟需求**: `batch_mode=false`
-
-## 模块说明
-
-### protocol/
-
-协议定义模块，包含：
-- 消息类型枚举
-- 像素格式定义
-- 音频格式定义
-- 消息头数据类
-- 协议解析器
-
-### logger/
-
-日志系统模块，包含：
-- 彩色终端输出
-- 多日志级别
-- 进度条支持
-- 文件日志支持
-- 线程安全
-
-### utils/
-
-工具类模块，包含：
-- `NetworkUtils` - 网络连接检测
-- `SessionStorage` - 会话数据存储
-- `ConnectionManager` - ZMQ 连接池管理
-- `parse_audio()` - 音频数据解析
-
+---
 
 ## 网络优化
 
+### Linux 系统缓冲区
+
 ```bash
-# Linux 系统缓冲区
 sudo sysctl -w net.core.rmem_max=268435456
 sudo sysctl -w net.core.wmem_max=268435456
+sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 67108864"
+sudo sysctl -w net.ipv4.tcp_wmem="4096 87380 67108864"
 ```
+
+### 网络要求
+
+- **带宽**: 建议 10Gbps 或更高（4K@60fps 需要 12 Gbps）
+- **延迟**: 建议 <5ms（局域网）
+- **稳定性**: 丢包率 <0.1%
+
+---
+
+## 项目结构
+
+```
+comfyui-remote-encoding/
+├── __init__.py                 # 包入口（默认 Arrow Flight）
+├── nodes_arrow.py              # Arrow Flight 节点 ⭐
+├── nodes_zmq_optimized.py      # ZMQ 优化版节点
+├── nodes.py                    # ZMQ 原版节点
+├── gpu_encoder_arrow.py        # Arrow Flight 服务器（单文件）⭐
+├── gpu_encoder.py              # ZMQ 服务器
+├── protocol/                   # ZMQ 协议定义
+│   ├── __init__.py
+│   └── protocol.py
+├── transport/                  # Arrow Flight 传输模块
+│   ├── __init__.py
+│   ├── client.py
+│   └── protocol.py
+├── logger/                     # 日志系统
+│   ├── __init__.py
+│   └── logger.py
+├── utils/                      # 工具模块
+│   ├── __init__.py
+│   ├── audio.py
+│   ├── connection.py
+│   ├── network.py
+│   └── storage.py
+├── README.md
+└── requirements.txt
+```
+
+**核心模块：**
+- `transport/` - Arrow Flight 传输层（零拷贝、批量优化）
+- `protocol/` - ZMQ 协议定义（消息类型、格式）
+- `logger/` - 专业日志系统（彩色、结构化、进度条）
+- `utils/` - 工具类（网络、连接、音频）
+
+---
+
+## ❓ 常见问题
+
+### Q: 如何选择协议？
+
+**Arrow Flight** - 追求最高性能、新项目
+**ZMQ 优化版** - 现有项目升级、需要快速迁移
+**ZMQ 原版** - 快速测试、学习项目
+
+### Q: 传输失败怎么办？
+
+1. 检查服务器是否启动
+2. 检查网络连通性
+3. 检查防火墙设置
+4. 查看服务器日志
+
+### Q: 如何提升性能？
+
+1. 使用 Arrow Flight 或 ZMQ 优化版
+2. 启用批量传输模式
+3. 调整批量大小和窗口
+4. 优化网络缓冲区
+5. 使用 10Gbps 网络
+
+### Q: 支持哪些编码器？
+
+- H.264 (h264_nvenc)
+- HEVC (hevc_nvenc)
+- AV1 (av1_nvenc)
+
+需要支持 NVENC 的 NVIDIA GPU。
+
+---
 
 ## 许可证
 
 MIT License
+
+---
+
+**有问题？** - 提交 Issue 或 Pull Request
+
+**喜欢这个项目？** - 给个 Star ⭐
