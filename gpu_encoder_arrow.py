@@ -528,14 +528,35 @@ class AudioMerger:
 class VideoFlightHandler(flight.ServerMiddleware):
     """Arrow Flight 视频处理处理器"""
 
-    def __init__(self, args, logger: Logger):
+    def __init__(self, args, logger: Logger, location):
         super().__init__()
         self.args = args
         self.log = logger
+        self.location = location
         self.sessions: Dict[str, SessionInfo] = {}
         self.encoder: Optional[FFmpegEncoder] = None
         self.merger = AudioMerger(logger)
         self.current_session: Optional[SessionInfo] = None
+
+    def get_flight_info(self, context, descriptor):
+        """获取 Flight 信息（响应客户端的 get_flight_info 请求）"""
+        path = descriptor.path
+        self.log.debug(f"get_flight_info request: {path}")
+
+        # 解析路径
+        parts = path.split("/")
+        if len(parts) < 1:
+            raise flight.FlightServerError("Invalid path")
+
+        action = parts[0]
+
+        # 返回基本的 FlightInfo
+        schema = pa.schema([])
+        endpoints = [flight.FlightEndpoint(descriptor, location=self.location)]
+        total_records = -1
+        total_bytes = -1
+
+        return flight.FlightInfo(schema, endpoints, total_records, total_bytes)
 
     def do_get(self, context, descriptor):
         """处理 GET 请求（会话信息查询）"""
@@ -801,7 +822,11 @@ class ArrowVideoServer(flight.FlightServerBase):
         super().__init__(location=location)
         self.args = args
         self.log = logger
-        self.handler = VideoFlightHandler(args, logger)
+        self.handler = VideoFlightHandler(args, logger, location)
+
+    def get_flight_info(self, context, descriptor):
+        """获取 Flight 信息"""
+        return self.handler.get_flight_info(context, descriptor)
 
     def do_put(self, context, descriptor, reader, writer):
         """PUT 请求入口"""
