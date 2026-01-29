@@ -607,11 +607,13 @@ class VideoFlightHandler(flight.ServerMiddleware):
         total_frames = 0
         has_audio = False
 
-        # 解析元数据
-        metadata_bytes = descriptor.descriptor
-        if metadata_bytes:
+        # 解析元数据（从 path 参数）
+        path = descriptor.path
+        parts = path.split("/")
+        if len(parts) >= 3:
             try:
-                metadata_dict = json.loads(metadata_bytes.to_pybytes())
+                metadata_str = "/".join(parts[2:])
+                metadata_dict = json.loads(metadata_str)
                 self.log.kv("Metadata", json.dumps(metadata_dict, indent=2))
 
                 # 从元数据中提取参数

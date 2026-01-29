@@ -100,11 +100,11 @@ def create_session_descriptor(
     """创建会话描述符"""
     import json
 
-    descriptor = flight.FlightDescriptor.for_path(
-        f"{FlightDescriptorType.SESSION_START}/{session_id}"
-    )
-    descriptor.descriptor = pa.py_buffer(json.dumps(metadata).encode())
-    return descriptor
+    # 将元数据编码为 path 的一部分
+    metadata_str = json.dumps(metadata)
+    encoded_path = f"{FlightDescriptorType.SESSION_START}/{session_id}/{metadata_str}"
+
+    return flight.FlightDescriptor.for_path(encoded_path)
 
 
 def create_frames_descriptor(session_id: str) -> flight.FlightDescriptor:
