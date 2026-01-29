@@ -6,11 +6,11 @@
 
 ## ✨ 新特性 v3.0 (Arrow Flight)
 
-- 🚀 **零拷贝传输** - 基于 Apache Arrow Flight，性能提升 30%
-- ⚡ **更高带宽** - 支持 9-11 Gbps 网络吞吐量
-- 📊 **专业进度条** - tqdm 高性能进度条
-- 📝 **结构化日志** - 分层、彩色、专业日志系统
-- 🎯 **单文件部署** - gpu_encoder_arrow.py 可独立部署
+-  **零拷贝传输** - 基于 Apache Arrow Flight，性能提升 30%
+-  **更高带宽** - 支持 9-11 Gbps 网络吞吐量
+-  **专业进度条** - tqdm 高性能进度条
+-  **结构化日志** - 分层、彩色、专业日志系统
+-  **单文件部署** - gpu_encoder_arrow.py 可独立部署
 
 ## 特性
 
@@ -60,8 +60,6 @@ from .nodes_arrow import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 # 4. 在 ComfyUI 中使用 "Remote GPU Encoder (Arrow Flight)" 节点
 ```
-
-详见：[ARROW_MIGRATION.md](ARROW_MIGRATION.md) | [QUICKSTART.md](QUICKSTART.md)
 
 ### ZMQ 版本（兼容）
 
@@ -246,31 +244,6 @@ v2.0 新增批量传输功能，大幅提升高帧率场景性能。
 - `ConnectionManager` - ZMQ 连接池管理
 - `parse_audio()` - 音频数据解析
 
-## 代码重构说明
-
-### v2.0 重构
-
-- 提取工具类到 `utils/` 模块
-- 分离协议定义到 `protocol/` 模块
-- 分离日志系统到 `logger/` 模块
-- 保持 `gpu_encoder.py` 单文件独立运行
-- 消除重复代码，提高可维护性
-
-### 依赖关系
-
-```
-nodes.py
-    ├── protocol/
-    ├── logger/
-    └── utils/
-            ├── network.py
-            ├── storage.py
-            ├── connection.py
-            └── audio.py
-
-gpu_encoder.py (独立运行)
-    └── 内置协议和日志定义（为了单文件部署）
-```
 
 ## 网络优化
 
@@ -283,10 +256,3 @@ sudo sysctl -w net.core.wmem_max=268435456
 ## 许可证
 
 MIT License
-
-## 🔗 更多文档
-
-- [ARROW_MIGRATION.md](ARROW_MIGRATION.md) - Arrow Flight 详细迁移指南
-- [ARROW_SUMMARY.md](ARROW_SUMMARY.md) - Arrow Flight 项目总结
-- [QUICKSTART.md](QUICKSTART.md) - 5 分钟快速开始
-- [REFACTORING.md](REFACTORING.md) - 项目重构文档
